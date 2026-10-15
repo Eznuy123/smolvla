@@ -16,8 +16,8 @@
 | 语言输入 | `Pick up the cube with the right arm and transfer it to the left arm.` |
 | 动作输出 | 14 维绝对关节与夹爪目标 |
 | 预测长度 | `chunk_size=50` |
-| 连续执行长度 | `n_action_steps=10`，随后根据新观测重新预测 |
-| 仿真控制频率 | 50 Hz；每 0.2 秒仿真时间重新预测一次 |
+| 连续执行长度 | 当前实验选用 `n_action_steps=20`；脚本参数默认值仍为 10，运行时显式指定 |
+| 仿真控制频率 | 50 Hz；执行长度 20 对应每 0.4 秒仿真时间重新预测一次 |
 | 演示数据 | 50 条 episode，共 20,000 帧 |
 
 当前训练属于**后训练中的监督微调（SFT）**；从机器人学习角度看，是使用专家演示进行的**模仿学习／行为克隆（BC）**。
@@ -128,7 +128,9 @@ uv run --locked python scripts/summarize_train.py out/train/smolvla_aloha_2k.log
 会生成同名 `.metrics.csv` 和 `.summary.json`，比较开头与结尾各十条日志的平均 loss。
 然后按评测命令将 checkpoint 路径替换为 `out/train/smolvla_aloha_2k/checkpoints/last/pretrained_model`。
 
-正式配置：使用执行长度 10、batch size 1 训练 20,000 步：
+### 基线：batch size 1、约 1 个 epoch
+
+使用执行长度 10、batch size 1 训练 20,000 步：
 
 ```bash
 uv run --locked python scripts/train.py \
@@ -157,6 +159,46 @@ uv run --locked python scripts/summarize_train.py out/train/smolvla_aloha_20k_a1
 out/train/smolvla_aloha_20k_a10/checkpoints/last/pretrained_model/
 ```
 
+### 当前方案：batch size 4、约 5 个 epoch
+
+本机已完成该方案训练。重新训练前，可以先用独立目录短跑 20 步检查显存：
+
+```bash
+uv run --locked python scripts/train.py \
+  --steps 20 \
+  --batch-size 4 \
+  --n-action-steps 20 \
+  --log-freq 1 \
+  --save-freq 20 \
+  --out out/train/smolvla_b4_check
+```
+
+完整训练命令：
+
+```bash
+uv run --locked python scripts/train.py \
+  --steps 25000 \
+  --batch-size 4 \
+  --n-action-steps 20 \
+  --save-freq 5000 \
+  --log-freq 100 \
+  --out out/train/smolvla_b4_e5_a20
+```
+
+这会从预训练基座开始一轮新微调。按当前数据集计算：`25000 × 4 / 20000 = 5 epoch`。
+如果 batch size 4 显存不足，可以使用 batch size 2、50,000 步获得约相同的数据遍历次数。
+
+```bash
+tail -f out/train/smolvla_b4_e5_a20.log
+uv run --locked python scripts/summarize_train.py out/train/smolvla_b4_e5_a20.log
+```
+
+最终 checkpoint：
+
+```text
+out/train/smolvla_b4_e5_a20/checkpoints/last/pretrained_model/
+```
+
 默认使用全部 50 条演示，冻结视觉编码器，训练动作专家和状态投影，启用 CUDA BF16 AMP。
 数据加载默认 `num-workers=0`，减少这台 16 GB 内存机器的额外开销。显存允许时可增加 `--batch-size`；内存允许时再增加 `--num-workers`。
 batch size 1 时，20,000 步约对应 20,000 个观测样本，即当前 20,000 帧数据集的一个 epoch；每个样本还包含未来 50 步的动作监督。
@@ -181,7 +223,7 @@ uv run --locked python scripts/train.py \
 
 ```bash
 uv run --locked python scripts/_train_backend.py \
-  --config_path=out/train/smolvla_aloha_20k_a10/checkpoints/last/pretrained_model/train_config.json \
+  --config_path=out/train/smolvla_b4_e5_a20/checkpoints/last/pretrained_model/train_config.json \
   --resume=true
 ```
 
@@ -190,10 +232,11 @@ uv run --locked python scripts/_train_backend.py \
 ### 本机训练记录（2026-10-15）
 
 - GPU：NVIDIA GeForce RTX 5060 Laptop GPU，标称 8 GB 显存。
-- 已保存的训练状态：20,000 步，batch size 1，执行长度 10。
-- 日志记录的训练循环耗时约 40 分 44 秒，不含模型初始化时间。
-- 最后一条训练日志的 loss 为 0.015；这是训练指标，不代表任务成功率。
-- 已通过该 checkpoint 的 50 步 MuJoCo 窗口在线推理测试，完整任务表现请按第 5 节评测。
+- 基线已完成：20,000 步，batch size 1，训练配置执行长度 10，约 1 个 epoch。
+- 基线训练循环耗时约 40 分 44 秒，不含模型初始化时间；最后一条训练日志的 loss 为 0.015。
+- 新模型已完成：25,000 步，batch size 4，执行长度 20，约 5 个 epoch。
+- 新模型在种子 2000–2009 的 10 局评测中成功 10 局；完整 100 局评测尚待完成。
+- loss 是训练指标；任务成功率及测试范围见下节，不能把 10/10 解释为长期稳定的 100%。
 
 ## 5. 加载 checkpoint 推理与评测
 
@@ -210,17 +253,32 @@ uv run --locked python scripts/eval.py \
   --out out/eval/smolvla_smoke
 ```
 
-正式模型评测：
+当前模型的 100 局基准评测，使用与旧模型相同的初始种子 2000–2099：
 
 ```bash
 uv run --locked python scripts/eval.py \
   --policy smolvla \
-  --checkpoint out/train/smolvla_aloha_20k_a10/checkpoints/last/pretrained_model \
+  --checkpoint out/train/smolvla_b4_e5_a20/checkpoints/last/pretrained_model \
   --prompt "Pick up the cube with the right arm and transfer it to the left arm." \
-  --n-action-steps 10 \
-  --episodes 10 \
+  --n-action-steps 20 \
+  --episodes 100 \
+  --seed 2000 \
   --max-steps 600 \
-  --out out/eval/smolvla_aloha_20k_a10
+  --out out/eval/benchmark_b4_e5_a20_seed2000_n100
+```
+
+已有 10 局结果保存在 `out/eval/benchmark_b4_e5_a20_seed2000/`，100 局评测使用独立目录，避免覆盖。
+完成对照后，再换一组种子检查泛化表现：
+
+```bash
+uv run --locked python scripts/eval.py \
+  --policy smolvla \
+  --checkpoint out/train/smolvla_b4_e5_a20/checkpoints/last/pretrained_model \
+  --n-action-steps 20 \
+  --episodes 100 \
+  --seed 3000 \
+  --max-steps 600 \
+  --out out/eval/benchmark_b4_e5_a20_seed3000_n100
 ```
 
 语言指令应与训练数据一致，可从数据集的 `meta/tasks.parquet` 查看。
@@ -228,20 +286,44 @@ uv run --locked python scripts/eval.py \
 `--max-steps` 同时配置 Gym 时间上限，避免底层默认 300 步过早截断。
 
 推理会加载 checkpoint 自带的归一化与反归一化处理器，调用 LeRobot 的 `select_action()` 管理动作队列。
-默认预测长度 `chunk_size=50`，每次只执行前 `n_action_steps=10` 个动作后重新根据观测预测，即每 0.2 秒仿真时间重新规划。
+默认预测长度 `chunk_size=50`；上面的命令每次只执行前 20 个动作后重新根据观测预测，即每 0.4 秒仿真时间重新规划。
+脚本的 `--n-action-steps` 默认值仍为 10，因此重现实验时需要显式指定 20。
 训练和评测均可用 `--n-action-steps` 修改执行长度；评测时也可覆盖旧 checkpoint 的 50 步执行配置，模型权重保持原样。
 评测的 `results.json` 会记录实际使用的执行长度和预测长度。
 必须使用适配过 ALOHA 的 checkpoint；原始 6 维基座不能直接控制这套双臂。
 
+### 已完成的评测
+
+| 模型 | 执行长度 | 初始种子 | 成功数／局数 | 成功率 |
+|---|---:|---|---:|---:|
+| 基线：batch 1、20k 步 | 5 | 1000–1019 | 7/20 | 35% |
+| 基线：batch 1、20k 步 | 10 | 1000–1019 | 10/20 | 50% |
+| 基线：batch 1、20k 步 | 20 | 1000–1019 | 14/20 | 70% |
+| 基线：batch 1、20k 步 | 20 | 2000–2099 | 63/100 | 63% |
+| 新模型：batch 4、25k 步 | 20 | 2000–2009 | 10/10 | 100%（小样本） |
+
+基线 100 局失败中，最大奖励为 0、1、2 的局数分别为 7、8、22。
+新模型在相同前 10 个初始场景上是 10/10，基线是 8/10；不能将新模型 10 局的 100% 与基线 100 局的 63% 直接当作完整对照。
+评测会从指定 `--seed` 开始依次增加场景种子；策略采样也有随机性，同组场景不代表模型内部随机轨迹完全相同。
+目前的改进是积极信号，仍需完成同组 100 局和另一组种子的验证。
+
+结果文件：
+
+- [执行长度 5 的 20 局结果](out/eval/benchmark_20k_a5/results.json)
+- [执行长度 10 的 20 局结果](out/eval/benchmark_20k_a10/results.json)
+- [执行长度 20 的 20 局结果](out/eval/benchmark_20k_a20/results.json)
+- [基线 100 局结果](out/eval/benchmark_20k_a20_seed2000/results.json)
+- [新模型 10 局结果](out/eval/benchmark_b4_e5_a20_seed2000/results.json)
+
 ## 6. MuJoCo 窗口在线推理
 
-在本机桌面终端运行，默认加载本次训练完成的 20,000 步 checkpoint：
+在本机桌面终端运行，显式加载新模型并使用执行长度 20：
 
 ```bash
 cd ~/aloha_sim_vla
 MUJOCO_GL=glfw uv run --locked python scripts/infer.py \
-  --checkpoint out/train/smolvla_aloha_20k_a10/checkpoints/last/pretrained_model \
-  --n-action-steps 10
+  --checkpoint out/train/smolvla_b4_e5_a20/checkpoints/last/pretrained_model \
+  --n-action-steps 20
 ```
 
 程序打开 MuJoCo 原生交互窗口，在同一套仿真物理状态上执行“相机观测 → 策略推理 → 关节控制”。
@@ -259,13 +341,15 @@ MUJOCO_GL=glfw uv run --locked python scripts/infer.py \
 
 ```bash
 MUJOCO_GL=glfw uv run --locked python scripts/infer.py \
+  --checkpoint out/train/smolvla_b4_e5_a20/checkpoints/last/pretrained_model \
   --camera top \
   --speed 0.5 \
   --episodes 3 \
-  --n-action-steps 10
+  --n-action-steps 20
 ```
 
-默认控制步长仍为 0.02 秒、每 10 个动作重新预测一次。程序尝试按正常速度推进；
+示例的控制步长为 0.02 秒、每 20 个动作重新预测一次。省略参数时，脚本仍默认加载旧的 20k 模型、执行长度 10。
+程序尝试按正常速度推进；
 如果推理或渲染来不及，仿真会放慢，不跳过动作。终端的 `sim/wall` 表示仿真时间与实际时间的比值。
 
 先检查窗口与仿真，而不加载模型：
