@@ -1,0 +1,32 @@
+[project]
+name = "aloha-sim-vla"
+version = "0.1.0"
+description = "在 MuJoCo 仿真里跑 ALOHA 双臂 + VLA 策略的实验工程"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "gymnasium>=0.29",
+    "gym-aloha==0.1.5",
+    "numpy",
+    "imageio[ffmpeg]",
+    "torch==2.11.0",
+    "lerobot[aloha,peft,smolvla,training]==0.6.1",
+    "torchvision==0.26.0",
+]
+
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+torchvision = { index = "pytorch" }
+cmake = { index = "pypi" }
